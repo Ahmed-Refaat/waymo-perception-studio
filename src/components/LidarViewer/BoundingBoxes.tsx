@@ -11,7 +11,7 @@
 
 import { useMemo, useCallback } from 'react'
 import * as THREE from 'three'
-import { useSceneStore, getObjectTrajectories, hasLaserAssociation } from '../../stores/useSceneStore'
+import { useSceneStore, getObjectTrajectories, hasLaserAssociation, getPoseByFrameIndex } from '../../stores/useSceneStore'
 import { BoxType, BOX_TYPE_COLORS, HIGHLIGHT_COLOR } from '../../types/waymo'
 import { VehicleModel, PedestrianModel, CyclistModel, SignModel } from './ObjectModels'
 import type { ParquetRow } from '../../utils/merge'
@@ -181,11 +181,21 @@ function ModelMesh({ box, highlighted, onHover }: {
 // Trajectory trail line
 // ---------------------------------------------------------------------------
 
-function TrajectoryTrail({ objectId, type, currentFrame, trailLength }: {
+/** Transform a vehicle-frame point by a 4×4 row-major pose matrix */
+function transformPoint(pose: number[], x: number, y: number, z: number): [number, number, number] {
+  return [
+    pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
+    pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
+    pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
+  ]
+}
+
+function TrajectoryTrail({ objectId, type, currentFrame, trailLength, worldMode }: {
   objectId: string
   type: number
   currentFrame: number
   trailLength: number
+  worldMode: boolean
 }) {
   const color = BOX_TYPE_COLORS[type] ?? BOX_TYPE_COLORS[BoxType.TYPE_UNKNOWN]
 
@@ -206,14 +216,25 @@ function TrajectoryTrail({ objectId, type, currentFrame, trailLength }: {
     const startIdx = Math.max(0, endIdx - trailLength)
     if (endIdx - startIdx < 2) return null
 
+    const poses = worldMode ? getPoseByFrameIndex() : null
     const points: THREE.Vector3[] = []
     for (let i = startIdx; i < endIdx; i++) {
       const p = trail[i]
-      points.push(new THREE.Vector3(p.x, p.y, p.z))
+      if (poses) {
+        const pose = poses.get(p.frameIndex)
+        if (pose) {
+          const [wx, wy, wz] = transformPoint(pose, p.x, p.y, p.z)
+          points.push(new THREE.Vector3(wx, wy, wz))
+        } else {
+          points.push(new THREE.Vector3(p.x, p.y, p.z))
+        }
+      } else {
+        points.push(new THREE.Vector3(p.x, p.y, p.z))
+      }
     }
 
     return new THREE.BufferGeometry().setFromPoints(points)
-  }, [objectId, currentFrame, trailLength])
+  }, [objectId, currentFrame, trailLength, worldMode])
 
   if (!geometry) return null
 
@@ -232,8 +253,6 @@ function TrajectoryTrail({ objectId, type, currentFrame, trailLength }: {
 export default function BoundingBoxes() {
   const boxMode = useSceneStore((s) => s.boxMode)
   const boxRows = useSceneStore((s) => s.currentFrame?.boxes)
-  const currentFrameIndex = useSceneStore((s) => s.currentFrameIndex)
-  const trailLength = useSceneStore((s) => s.trailLength)
   const hoveredBoxId = useSceneStore((s) => s.hoveredBoxId)
   const highlightedLaserBoxId = useSceneStore((s) => s.highlightedLaserBoxId)
   const setHoveredBox = useSceneStore((s) => s.actions.setHoveredBox)
@@ -254,8 +273,6 @@ export default function BoundingBoxes() {
   return (
     <>
       {parsed.map((box, i) => {
-        // Determine highlight state: 'self' if directly hovered from 3D,
-        // 'linked' if highlighted via 2D camera hover
         const highlighted: 'self' | 'linked' | false =
           hoveredBoxId === box.id ? 'self'
           : highlightedLaserBoxId === box.id ? 'linked'
@@ -270,7 +287,31 @@ export default function BoundingBoxes() {
           />
         )
       })}
-      {trailLength > 0 && parsed.map((box) =>
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Trajectory trails — exported separately for world-mode positioning
+// ---------------------------------------------------------------------------
+
+export function TrajectoryTrails() {
+  const boxMode = useSceneStore((s) => s.boxMode)
+  const boxRows = useSceneStore((s) => s.currentFrame?.boxes)
+  const currentFrameIndex = useSceneStore((s) => s.currentFrameIndex)
+  const trailLength = useSceneStore((s) => s.trailLength)
+  const worldMode = useSceneStore((s) => s.worldMode)
+
+  const parsed = useMemo(() => {
+    if (!boxRows || boxRows.length === 0) return []
+    return parseBoxes(boxRows)
+  }, [boxRows])
+
+  if (boxMode === 'off' || trailLength <= 0 || parsed.length === 0) return null
+
+  return (
+    <>
+      {parsed.map((box) =>
         box.id ? (
           <TrajectoryTrail
             key={`trail-${box.id}`}
@@ -278,6 +319,7 @@ export default function BoundingBoxes() {
             type={box.type}
             currentFrame={currentFrameIndex}
             trailLength={trailLength}
+            worldMode={worldMode}
           />
         ) : null,
       )}

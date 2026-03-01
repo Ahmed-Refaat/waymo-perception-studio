@@ -255,7 +255,6 @@ export async function readFrameData(
 export const HEAVY_COMPONENTS = new Set([
   'camera_image',
   'lidar',
-  'lidar_camera_projection',
   'lidar_pose',
 ])
 

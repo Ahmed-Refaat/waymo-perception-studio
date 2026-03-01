@@ -121,6 +121,7 @@ const ALL_SENSORS = new Set([1, 2, 3, 4, 5])
 
 export default function PointCloud() {
   const currentFrame = useSceneStore((s) => s.currentFrame)
+  const currentFrameIndex = useSceneStore((s) => s.currentFrameIndex)
   const visibleSensors = useSceneStore((s) => s.visibleSensors)
   const pointOpacity = useSceneStore((s) => s.pointOpacity)
   const colormapMode = useSceneStore((s) => s.colormapMode)
@@ -156,10 +157,6 @@ export default function PointCloud() {
 
     const posArr = posAttr.array as Float32Array
     const colArr = colorAttr.array as Float32Array
-    const stops = COLORMAP_STOPS[colormapMode]
-    const attrOff = ATTR_OFFSET[colormapMode]
-    const [attrMin, attrMax] = ATTR_RANGE[colormapMode]
-    const attrSpan = attrMax - attrMin
 
     if (allVisible) {
       // Fast path: use pre-merged buffer
@@ -170,6 +167,11 @@ export default function PointCloud() {
       }
       const { positions, pointCount } = pc
       const count = Math.min(pointCount, MAX_POINTS)
+
+      const stops = COLORMAP_STOPS[colormapMode]
+      const attrOff = ATTR_OFFSET[colormapMode]
+      const [attrMin, attrMax] = ATTR_RANGE[colormapMode]
+      const attrSpan = attrMax - attrMin
 
       for (let i = 0; i < count; i++) {
         const src = i * POINT_STRIDE
@@ -190,12 +192,17 @@ export default function PointCloud() {
       geom.setDrawRange(0, count)
       geom.computeBoundingSphere()
     } else {
-      // Per-sensor path: merge visible sensors, same colormap
+      // Per-sensor path: merge visible sensors
       const sensorClouds = currentFrame.sensorClouds
       if (!sensorClouds || sensorClouds.size === 0) {
         geom.setDrawRange(0, 0)
         return
       }
+
+      const stops = COLORMAP_STOPS[colormapMode]
+      const attrOff = ATTR_OFFSET[colormapMode]
+      const [attrMin, attrMax] = ATTR_RANGE[colormapMode]
+      const attrSpan = attrMax - attrMin
 
       let total = 0
       for (const [laserName, cloud] of sensorClouds) {

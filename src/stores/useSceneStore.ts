@@ -43,6 +43,40 @@ import { CameraWorkerPool } from '../workers/cameraWorkerPool'
 import type { SegmentMeta } from '../types/waymo'
 
 // ---------------------------------------------------------------------------
+// Row-major 4×4 matrix helpers (for world-coordinate normalization)
+// ---------------------------------------------------------------------------
+
+/** Multiply two row-major 4×4 matrices: result = A * B */
+function multiplyRowMajor4x4(a: number[], b: number[]): number[] {
+  const r = new Array(16)
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      r[i * 4 + j] =
+        a[i * 4 + 0] * b[0 * 4 + j] +
+        a[i * 4 + 1] * b[1 * 4 + j] +
+        a[i * 4 + 2] * b[2 * 4 + j] +
+        a[i * 4 + 3] * b[3 * 4 + j]
+    }
+  }
+  return r
+}
+
+/** Invert a row-major 4×4 rigid-body transform [R|t; 0 0 0 1] → [R^T | -R^T·t] */
+function invertRowMajor4x4(m: number[]): number[] {
+  // Transpose the 3×3 rotation part
+  const r00 = m[0], r01 = m[1], r02 = m[2], tx = m[3]
+  const r10 = m[4], r11 = m[5], r12 = m[6], ty = m[7]
+  const r20 = m[8], r21 = m[9], r22 = m[10], tz = m[11]
+  // inv = [R^T | -R^T * t]
+  return [
+    r00, r10, r20, -(r00 * tx + r10 * ty + r20 * tz),
+    r01, r11, r21, -(r01 * tx + r11 * ty + r21 * tz),
+    r02, r12, r22, -(r02 * tx + r12 * ty + r22 * tz),
+    0, 0, 0, 1,
+  ]
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -85,6 +119,7 @@ interface SceneActions {
   setAvailableSegments: (segments: string[]) => void
   selectSegment: (segmentId: string) => Promise<void>
   loadFromFiles: (segments: Map<string, Map<string, File>>) => Promise<void>
+  toggleWorldMode: () => void
   reset: () => void
 }
 
@@ -145,6 +180,8 @@ export interface SceneState {
   highlightedCameraBoxIds: Set<string>
   /** Laser box ID to highlight (derived from hovering a 2D box) */
   highlightedLaserBoxId: string | null
+  /** World coordinate mode (true = world frame, false = vehicle frame) */
+  worldMode: boolean
   /** All discovered segment IDs */
   availableSegments: string[]
   /** Segment metadata from stats component (segmentId → SegmentMeta) */
@@ -199,6 +236,10 @@ const internal = {
   assocCamToLaser: new Map<string, string>(),
   /** Association lookup: laser_object_id → Set<camera_object_id> */
   assocLaserToCams: new Map<string, Set<string>>(),
+  /** Vehicle pose per frame index (for world-mode trajectory trails) — relative to frame 0 */
+  poseByFrameIndex: new Map<number, number[]>(),
+  /** Inverse of frame 0's world_from_vehicle (used to make frame 0 = origin) */
+  worldOriginInverse: null as number[] | null,
   /** File-based segments from drag & drop (segmentId → component → File) */
   filesBySegment: null as Map<string, Map<string, File>> | null,
   /** Blob URLs created for workers — revoke on reset to free memory */
@@ -217,6 +258,8 @@ function resetInternal() {
   internal.objectTrajectories.clear()
   internal.assocCamToLaser.clear()
   internal.assocLaserToCams.clear()
+  internal.poseByFrameIndex.clear()
+  internal.worldOriginInverse = null
   internal.loadedRowGroups.clear()
   internal.prefetchStarted = false
   if (internal.playIntervalId !== null) {
@@ -269,7 +312,10 @@ function cacheRowGroupFrames(
     const boxes = internal.lidarBoxByFrame.get(timestamp) ?? []
     const cameraBoxes = internal.cameraBoxByFrame.get(timestamp) ?? []
     const poseRows = internal.vehiclePoseByFrame.get(timestamp)
-    const vehiclePose = (poseRows?.[0]?.['[VehiclePoseComponent].world_from_vehicle.transform'] as number[]) ?? null
+    const rawPose = (poseRows?.[0]?.['[VehiclePoseComponent].world_from_vehicle.transform'] as number[]) ?? null
+    const vehiclePose = rawPose && internal.worldOriginInverse
+      ? multiplyRowMajor4x4(internal.worldOriginInverse, rawPose)
+      : rawPose
 
     const sensorClouds = new Map<number, PointCloud>()
     if (frame.sensorClouds) {
@@ -292,6 +338,11 @@ function cacheRowGroupFrames(
     }
 
     internal.frameCache.set(frameIndex, frameData)
+
+    // Track last conversion time from worker result
+    if (frame.convertMs > 0) {
+      internal.lastConvertMs = frame.convertMs
+    }
   }
 
   syncCachedFrames(set)
@@ -356,6 +407,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
   hoveredBoxId: null,
   highlightedCameraBoxIds: new Set<string>(),
   highlightedLaserBoxId: null,
+  worldMode: false,
   availableSegments: [],
   segmentMetas: new Map(),
   currentSegment: null,
@@ -398,7 +450,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
         // 3. Init LiDAR + Camera workers in parallel
         set({ loadStep: 'workers' as LoadStep })
         await Promise.all([
-          initDataWorker(sources, get),
+          initDataWorker(sources, get, set),
           initCameraWorker(sources),
         ])
         completed++
@@ -647,6 +699,10 @@ export const useSceneStore = create<SceneState>((set, get) => ({
       await actions.loadDataset(sources as Map<string, File | string>)
     },
 
+    toggleWorldMode: () => {
+      set((s) => ({ worldMode: !s.worldMode }))
+    },
+
     loadFromFiles: async (segments: Map<string, Map<string, File>>) => {
       // Store file references for later use by selectSegment
       internal.filesBySegment = segments
@@ -686,7 +742,7 @@ export const useSceneStore = create<SceneState>((set, get) => ({
         pointOpacity: 0.85,
         colormapMode: 'intensity' as ColormapMode,
         hasBoxData: false,
-        activeCam: null,
+              activeCam: null,
         hoveredCam: null,
         hoveredBoxId: null,
         highlightedCameraBoxIds: new Set<string>(),
@@ -813,6 +869,27 @@ async function loadStartupData(set: (partial: Partial<SceneState>) => void, get:
     internal.timestamps = index.timestamps
     internal.timestampToFrame = index.frameByTimestamp
     internal.vehiclePoseByFrame = groupIndexBy(rows, 'key.frame_timestamp_micros')
+    // Build poseByFrameIndex for world-mode trajectory trails (relative to frame 0)
+    // 1) Find frame 0 pose and compute its inverse
+    const frame0Ts = internal.timestamps[0]
+    const frame0Rows = internal.vehiclePoseByFrame.get(frame0Ts)
+    const frame0Pose = frame0Rows?.[0]?.['[VehiclePoseComponent].world_from_vehicle.transform'] as number[] | undefined
+    if (frame0Pose) {
+      internal.worldOriginInverse = invertRowMajor4x4(frame0Pose)
+    }
+    // 2) Store relative poses: inv(pose0) * poseN
+    for (const row of rows) {
+      const ts = row['key.frame_timestamp_micros'] as bigint
+      const fi = internal.timestampToFrame.get(ts)
+      const pose = row['[VehiclePoseComponent].world_from_vehicle.transform'] as number[] | undefined
+      if (fi !== undefined && pose) {
+        if (internal.worldOriginInverse) {
+          internal.poseByFrameIndex.set(fi, multiplyRowMajor4x4(internal.worldOriginInverse, pose))
+        } else {
+          internal.poseByFrameIndex.set(fi, pose)
+        }
+      }
+    }
     set({ totalFrames: index.timestamps.length })
   }
 
@@ -962,6 +1039,7 @@ async function loadStartupData(set: (partial: Partial<SceneState>) => void, get:
 async function initDataWorker(
   sources: Map<string, File | string>,
   get: () => SceneState,
+  set: (partial: Partial<SceneState>) => void,
 ) {
   const lidarSource = sources.get('lidar')
   if (!lidarSource) return
@@ -1081,3 +1159,9 @@ export function getObjectTrajectories() {
 export function hasLaserAssociation(laserObjectId: string): boolean {
   return internal.assocLaserToCams.has(laserObjectId)
 }
+
+/** Per-frame vehicle poses for world-mode trajectory trails */
+export function getPoseByFrameIndex(): Map<number, number[]> {
+  return internal.poseByFrameIndex
+}
+

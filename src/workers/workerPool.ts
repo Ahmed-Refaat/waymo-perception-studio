@@ -91,11 +91,12 @@ export class WorkerPool {
 
       readyPromises.push(readyPromise)
 
-      worker.postMessage({
+      const initMsg: DataWorkerRequest = {
         type: 'init',
         lidarUrl: opts.lidarUrl,
         calibrationEntries: opts.calibrationEntries,
-      } satisfies DataWorkerRequest)
+      }
+      worker.postMessage(initMsg)
     }
 
     const results = await Promise.all(readyPromises)
@@ -135,11 +136,12 @@ export class WorkerPool {
 
       readyPromises.push(readyPromise)
 
-      pw.worker.postMessage({
+      const initMsg: DataWorkerRequest = {
         type: 'init',
         lidarUrl: opts.lidarUrl,
         calibrationEntries: opts.calibrationEntries,
-      } satisfies DataWorkerRequest)
+      }
+      pw.worker.postMessage(initMsg)
     }
 
     const results = await Promise.all(readyPromises)

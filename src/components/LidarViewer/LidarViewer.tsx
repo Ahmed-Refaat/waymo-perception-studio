@@ -14,7 +14,7 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber'
 import { OrbitControls, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import * as THREE from 'three'
 import PointCloud from './PointCloud'
-import BoundingBoxes from './BoundingBoxes'
+import BoundingBoxes, { TrajectoryTrails } from './BoundingBoxes'
 import CameraFrustums from './CameraFrustums'
 import { useSceneStore } from '../../stores/useSceneStore'
 import { parseCameraCalibrations, type CameraCalib } from '../../utils/cameraCalibration'
@@ -150,6 +150,20 @@ function PovController({
 }
 
 // ---------------------------------------------------------------------------
+// World-mode helpers
+// ---------------------------------------------------------------------------
+
+const _identity = new THREE.Matrix4()
+
+/** Convert Waymo row-major 4×4 to Three.js column-major Matrix4 */
+function poseToMatrix4(pose: number[]): THREE.Matrix4 {
+  const m = new THREE.Matrix4()
+  m.fromArray(pose)
+  m.transpose() // Waymo row-major → Three.js column-major
+  return m
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -169,7 +183,11 @@ export default function LidarViewer() {
   const cameraCalibrations = useSceneStore((s) => s.cameraCalibrations)
   const activeCam = useSceneStore((s) => s.activeCam)
   const setActiveCam = useSceneStore((s) => s.actions.setActiveCam)
+  const worldMode = useSceneStore((s) => s.worldMode)
+  const toggleWorldMode = useSceneStore((s) => s.actions.toggleWorldMode)
+  const vehiclePose = useSceneStore((s) => s.currentFrame?.vehiclePose ?? null)
   const orbitRef = useRef<any>(null)
+  const sceneGroupRef = useRef<THREE.Group>(null)
   const returningRef = useRef(false)
   const [panelOpen, setPanelOpen] = useState(true)
 
@@ -179,6 +197,17 @@ export default function LidarViewer() {
     [cameraCalibrations],
   )
   const activeCalib = activeCam !== null ? calibMap.get(activeCam) ?? null : null
+
+  // Update scene group matrix when world mode or pose changes
+  useEffect(() => {
+    if (!sceneGroupRef.current) return
+    if (worldMode && vehiclePose) {
+      sceneGroupRef.current.matrix.copy(poseToMatrix4(vehiclePose))
+    } else {
+      sceneGroupRef.current.matrix.copy(_identity)
+    }
+    sceneGroupRef.current.matrixWorldNeedsUpdate = true
+  }, [worldMode, vehiclePose])
 
   // ESC to exit POV
   useEffect(() => {
@@ -209,24 +238,30 @@ export default function LidarViewer() {
         <ambientLight intensity={0.3} />
         <directionalLight position={[50, -30, 80]} intensity={1.0} />
         <directionalLight position={[-30, 40, 20]} intensity={0.4} />
-        <PointCloud />
-        <BoundingBoxes />
-        <CameraFrustums activeCam={activeCam} />
+
+        {/* Scene group: transformed by vehiclePose in world mode */}
+        <group ref={sceneGroupRef} matrixAutoUpdate={false}>
+          <PointCloud />
+          <BoundingBoxes />
+          <CameraFrustums activeCam={activeCam} />
+          {/* Vehicle origin marker (moves with vehicle in world mode) */}
+          <mesh position={[0, 0, 0]}>
+            <sphereGeometry args={[0.3, 16, 16]} />
+            <meshBasicMaterial color={colors.vehicleMarker} />
+          </mesh>
+        </group>
+
+        {/* Trajectory trails — outside scene group (handles own world transforms) */}
+        <TrajectoryTrails />
 
         {/* POV animation controller */}
         <PovController targetCalib={activeCalib} orbitRef={orbitRef} returningRef={returningRef} />
 
-        {/* Ground grid (XY plane, Z=0) */}
+        {/* Ground grid (XY plane, Z=0) — stays at world origin */}
         <gridHelper
           args={[200, 40, colors.gridMajor, colors.gridMinor]}
           rotation={[Math.PI / 2, 0, 0]}
         />
-
-        {/* Vehicle origin marker */}
-        <mesh position={[0, 0, 0]}>
-          <sphereGeometry args={[0.3, 16, 16]} />
-          <meshBasicMaterial color={colors.vehicleMarker} />
-        </mesh>
 
         <OrbitControls
           ref={orbitRef}
@@ -297,7 +332,44 @@ export default function LidarViewer() {
           </span>
         </button>
 
-        {panelOpen && <>{SENSOR_INFO.map(({ id, label, color }) => {
+        {panelOpen && <>
+        {/* ── COORDINATE group ── */}
+        <div style={{
+          display: 'flex',
+          borderRadius: radius.sm,
+          overflow: 'hidden',
+          backgroundColor: 'rgba(255,255,255,0.04)',
+        }}>
+          {([false, true] as const).map((isWorld) => {
+            const active = worldMode === isWorld
+            return (
+              <button
+                key={isWorld ? 'world' : 'vehicle'}
+                onClick={active ? undefined : toggleWorldMode}
+                style={{
+                  flex: 1,
+                  padding: '4px 0',
+                  fontSize: '10px',
+                  fontFamily: fonts.sans,
+                  fontWeight: active ? 600 : 400,
+                  border: 'none',
+                  cursor: active ? 'default' : 'pointer',
+                  backgroundColor: active ? 'rgba(0, 200, 219, 0.15)' : 'transparent',
+                  color: active ? colors.accentBlue : colors.textDim,
+                  transition: 'all 0.15s',
+                  letterSpacing: '0.3px',
+                }}
+              >
+                {isWorld ? 'World' : 'Vehicle'}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* ── Divider ── */}
+        <div style={{ height: '1px', backgroundColor: colors.border, margin: '4px 4px' }} />
+
+        {SENSOR_INFO.map(({ id, label, color }) => {
           const active = visibleSensors.has(id)
           const cloud = sensorClouds?.get(id)
           const pts = cloud ? cloud.pointCount.toLocaleString() : '—'

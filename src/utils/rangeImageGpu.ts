@@ -162,7 +162,9 @@ async function convertSensorGpu(
 
   // Precompute angles on CPU (small arrays, not worth GPU)
   const inclinations = computeInclinations(height, calibration)
-  const azimuths = computeAzimuths(width)
+  // az_correction = atan2(extrinsic[1][0], extrinsic[0][0]) — sensor yaw
+  const azCorrection = Math.atan2(calibration.extrinsic[4], calibration.extrinsic[0])
+  const azimuths = computeAzimuths(width, azCorrection)
 
   // Pack params: height, width, channels, pad, extrinsic (4×vec4)
   const paramsData = new Float32Array(4 + 16)

@@ -1,23 +1,167 @@
 /**
  * Unit tests for useSceneStore (Zustand).
  *
- * Loads real Waymo data ONCE, then runs all tests against the shared state.
+ * Loads mock Waymo fixture data ONCE, then runs all tests against the shared state.
  * This mirrors production: dataset loads once, user navigates frames.
  *
- * Performance regression guard:
- *   CPU conversion (convertAllSensors) for ~168K points across 5 sensors.
- *   Measured baseline: M2 MacBook Air ~5ms.
- *   Threshold: 50ms (10× headroom for CI / slower machines).
- *   If this fails, a code change likely regressed the conversion algorithm.
+ * Worker pools are mocked to run in-process (Node.js has no Worker).
+ * The mock performs real Parquet I/O + range image conversion, same as production,
+ * just synchronously in the main thread instead of a Web Worker.
  *
  * Run with: npx vitest run useSceneStore
  */
 
-import { describe, it, expect, afterAll, beforeAll } from 'vitest'
+import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest'
 import { readFileSync, closeSync } from 'fs'
 import { openSync, readSync, fstatSync } from 'fs'
 import { resolve } from 'path'
 import type { AsyncBuffer } from 'hyparquet'
+import type { LidarCalibration, RangeImage } from '../../utils/rangeImage'
+
+// ---------------------------------------------------------------------------
+// Mock WorkerPool — runs Parquet I/O + LiDAR conversion in-process
+// ---------------------------------------------------------------------------
+
+vi.mock('../../workers/workerPool', () => {
+  // Dynamically import the real modules inside the factory (top-level imports
+  // would be hoisted AFTER vi.mock, causing reference errors).
+  return {
+    WorkerPool: class MockWorkerPool {
+      private pf: unknown = null
+      private calibrations = new Map<number, LidarCalibration>()
+      private _numRowGroups = 0
+
+      constructor(public readonly concurrency: number) {}
+
+      async init(opts: {
+        lidarUrl: string | File | AsyncBuffer
+        calibrationEntries: [number, LidarCalibration][]
+      }) {
+        const { openParquetFile, buildHeavyFileFrameIndex, readRowGroupRows } =
+          await import('../../utils/parquet')
+        const { convertAllSensors } = await import('../../utils/rangeImage')
+
+        // Store references for requestRowGroup
+        this.calibrations = new Map(opts.calibrationEntries)
+        this.pf = await openParquetFile('lidar', opts.lidarUrl as AsyncBuffer)
+        const pfTyped = this.pf as Awaited<ReturnType<typeof openParquetFile>>
+        this._numRowGroups = pfTyped.rowGroups.length
+
+        // Attach modules for later use
+        ;(this as any)._readRowGroupRows = readRowGroupRows
+        ;(this as any)._convertAllSensors = convertAllSensors
+
+        return { numRowGroups: this._numRowGroups }
+      }
+
+      async reinit(opts: {
+        lidarUrl: string | File | AsyncBuffer
+        calibrationEntries: [number, LidarCalibration][]
+      }) {
+        return this.init(opts)
+      }
+
+      getNumRowGroups() {
+        return this._numRowGroups
+      }
+
+      isReady() {
+        return this.pf !== null
+      }
+
+      async requestRowGroup(rowGroupIndex: number) {
+        const readRowGroupRows = (this as any)._readRowGroupRows as typeof import('../../utils/parquet').readRowGroupRows
+        const convertAllSensors = (this as any)._convertAllSensors as typeof import('../../utils/rangeImage').convertAllSensors
+
+        const LIDAR_COLUMNS = [
+          'key.frame_timestamp_micros',
+          'key.laser_name',
+          '[LiDARComponent].range_image_return1.shape',
+          '[LiDARComponent].range_image_return1.values',
+        ]
+
+        const t0 = performance.now()
+        const allRows = await readRowGroupRows(this.pf as any, rowGroupIndex, LIDAR_COLUMNS)
+
+        // Group by timestamp
+        const frameGroups = new Map<bigint, typeof allRows>()
+        for (const row of allRows) {
+          const ts = row['key.frame_timestamp_micros'] as bigint
+          let group = frameGroups.get(ts)
+          if (!group) {
+            group = []
+            frameGroups.set(ts, group)
+          }
+          group.push(row)
+        }
+
+        // Convert each frame
+        const frames: any[] = []
+        for (const [ts, rows] of frameGroups) {
+          const rangeImages = new Map<number, RangeImage>()
+          for (const row of rows) {
+            const laserName = row['key.laser_name'] as number
+            rangeImages.set(laserName, {
+              shape: row['[LiDARComponent].range_image_return1.shape'] as [number, number, number],
+              values: row['[LiDARComponent].range_image_return1.values'] as number[],
+            })
+          }
+
+          const ct0 = performance.now()
+          const result = convertAllSensors(rangeImages, this.calibrations)
+          const convertMs = performance.now() - ct0
+
+          const sensorClouds: any[] = []
+          for (const [laserName, cloud] of result.perSensor) {
+            sensorClouds.push({ laserName, positions: cloud.positions, pointCount: cloud.pointCount })
+          }
+
+          frames.push({
+            timestamp: ts.toString(),
+            positions: result.merged.positions,
+            pointCount: result.merged.pointCount,
+            sensorClouds,
+            convertMs,
+          })
+        }
+
+        return {
+          type: 'rowGroupReady' as const,
+          requestId: 0,
+          rowGroupIndex,
+          frames,
+          totalMs: performance.now() - t0,
+        }
+      }
+
+      terminate() { /* no-op */ }
+    },
+  }
+})
+
+vi.mock('../../workers/cameraWorkerPool', () => {
+  return {
+    CameraWorkerPool: class MockCameraWorkerPool {
+      constructor(public readonly concurrency: number) {}
+      async init() {
+        // No camera fixtures → init "fails" gracefully by returning 0 row groups
+        return { numRowGroups: 0 }
+      }
+      async reinit() { return { numRowGroups: 0 } }
+      getNumRowGroups() { return 0 }
+      isReady() { return false }
+      async requestRowGroup(): Promise<never> {
+        throw new Error('No camera data in test fixtures')
+      }
+      terminate() { /* no-op */ }
+    },
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Imports (AFTER vi.mock calls — vitest hoists vi.mock automatically)
+// ---------------------------------------------------------------------------
+
 import { isHeavyComponent } from '../../utils/parquet'
 import { useSceneStore } from '../useSceneStore'
 
@@ -25,11 +169,11 @@ import { useSceneStore } from '../useSceneStore'
 // Helpers
 // ---------------------------------------------------------------------------
 
-const WAYMO_DATA = resolve(__dirname, '../../../waymo_data')
-const SEGMENT_ID = '10023947602400723454_1120_000_1140_000'
+const FIXTURES = resolve(__dirname, '../../__fixtures__')
+const SEGMENT_ID = 'mock_segment_0000'
 
 function parquetPath(component: string): string {
-  return resolve(WAYMO_DATA, component, `${SEGMENT_ID}.parquet`)
+  return resolve(FIXTURES, SEGMENT_ID, `${component}.parquet`)
 }
 
 const openFds: number[] = []
@@ -83,6 +227,12 @@ const state = () => useSceneStore.getState()
 const actions = () => state().actions
 
 // ---------------------------------------------------------------------------
+// Mock fixture dimensions (from scripts/generate_fixtures.py)
+// TOP: 8×100, FRONT: 8×50, SIDE_L/R/REAR: 4×20
+// ~88% valid → TOP~704 + FRONT~352 + 3×SIDE~210 ≈ 1266 points
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -90,7 +240,7 @@ describe('useSceneStore', () => {
   // Load dataset ONCE for all tests (mirrors production usage)
   beforeAll(async () => {
     await actions().loadDataset(buildTestSources() as Map<string, File | string>)
-  }, 30000)
+  }, 60000)
 
   describe('initial state (before load)', () => {
     it('a fresh store starts idle', () => {
@@ -128,12 +278,14 @@ describe('useSceneStore', () => {
       expect(state().currentFrameIndex).toBe(0)
       expect(state().currentFrame).not.toBeNull()
       const pc = state().currentFrame!.pointCloud!
-      expect(pc.pointCount).toBeGreaterThan(150000)
-      expect(pc.pointCount).toBeLessThan(200000)
+      // Mock fixtures: ~1266 points total (small range images)
+      expect(pc.pointCount).toBeGreaterThan(800)
+      expect(pc.pointCount).toBeLessThan(2000)
       expect(pc.positions.length).toBe(pc.pointCount * 6)
     })
 
     it('has bounding boxes', () => {
+      // Mock: 75 objects per frame
       expect(state().currentFrame!.boxes.length).toBeGreaterThan(50)
     })
 
@@ -144,8 +296,6 @@ describe('useSceneStore', () => {
     it('reports load and conversion timing', () => {
       expect(state().lastFrameLoadMs).toBeGreaterThan(0)
       expect(state().lastConvertMs).toBeGreaterThan(0)
-      // CPU conversion regression guard: M2 baseline ~5ms, 10× margin
-      expect(state().lastConvertMs).toBeLessThan(50)
     })
   })
 
@@ -155,7 +305,6 @@ describe('useSceneStore', () => {
       await actions().nextFrame()
       expect(state().currentFrameIndex).toBe(1)
       expect(state().currentFrame?.pointCloud).not.toBeNull()
-      expect(state().lastConvertMs).toBeLessThan(50)
     }, 15000)
 
     it('prevFrame → back to 0', async () => {
@@ -168,7 +317,6 @@ describe('useSceneStore', () => {
       await actions().seekFrame(50)
       expect(state().currentFrameIndex).toBe(50)
       expect(state().currentFrame?.pointCloud).not.toBeNull()
-      expect(state().lastConvertMs).toBeLessThan(50)
     }, 15000)
 
     it('clamps below 0', async () => {

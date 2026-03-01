@@ -33,7 +33,7 @@ gcloud auth login
 ```bash
 BUCKET="gs://waymo_open_dataset_v_2_0_1/training"
 SEGMENT="10203656353524179475_7625_000_7645_000"
-COMPONENTS="vehicle_pose lidar_calibration camera_calibration lidar_box lidar camera_image"
+COMPONENTS="vehicle_pose lidar_calibration camera_calibration lidar_box lidar lidar_camera_projection camera_image"
 
 for C in $COMPONENTS; do
   mkdir -p waymo_data/$C
@@ -45,7 +45,7 @@ done
 
 ```bash
 BUCKET="gs://waymo_open_dataset_v_2_0_1/training"
-COMPONENTS="vehicle_pose lidar_calibration camera_calibration lidar_box lidar camera_image"
+COMPONENTS="vehicle_pose lidar_calibration camera_calibration lidar_box lidar lidar_camera_projection camera_image"
 N=3
 
 SEGMENTS=$(gsutil ls "$BUCKET/vehicle_pose/*.parquet" | head -$N | xargs -I{} basename {} .parquet)
@@ -63,15 +63,16 @@ done
 
 ```
 waymo_data/
-├── vehicle_pose/         ← ego vehicle world transform
-├── lidar/                ← range images from 5 LiDAR sensors
-├── lidar_box/            ← 3D bounding boxes with tracking IDs
-├── lidar_calibration/    ← LiDAR extrinsic transforms
-├── camera_image/         ← JPEGs from 5 cameras
-└── camera_calibration/   ← camera intrinsic/extrinsic
+├── vehicle_pose/              ← ego vehicle world transform
+├── lidar/                     ← range images from 5 LiDAR sensors
+├── lidar_box/                 ← 3D bounding boxes with tracking IDs
+├── lidar_calibration/         ← LiDAR extrinsic transforms
+├── lidar_camera_projection/   ← LiDAR→camera pixel mapping (for RGB colormap)
+├── camera_image/              ← JPEGs from 5 cameras
+└── camera_calibration/        ← camera intrinsic/extrinsic
 ```
 
-Each segment is a **20-second driving clip** at **10 Hz** (~200 frames). A single segment is ~500 MB across 6 components.
+Each segment is a **20-second driving clip** at **10 Hz** (~200 frames). A single segment is ~570 MB across 7 components.
 
 Drag & drop the `waymo_data/` folder into the app. Multiple segments are auto-detected with a dropdown selector.
 

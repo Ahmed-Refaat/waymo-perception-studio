@@ -129,6 +129,7 @@ export function computeAzimuths(width: number, azCorrection: number): Float32Arr
  *
  * Output format: Float32Array of [x, y, z, intensity, x, y, z, intensity, ...]
  * Only valid points (range > 0) are included.
+ *
  */
 export function convertRangeImageToPointCloud(
   rangeImage: RangeImage,
@@ -203,10 +204,8 @@ export function convertRangeImageToPointCloud(
     }
   }
 
-  return {
-    positions: output.subarray(0, pointCount * POINT_STRIDE),
-    pointCount,
-  }
+  const positions = output.subarray(0, pointCount * POINT_STRIDE)
+  return { positions, pointCount }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +245,7 @@ export function convertAllSensors(
     totalPoints += cloud.pointCount
   }
 
-  // Merge into single Float32Array
+  // Merge positions into single Float32Array
   const merged = new Float32Array(totalPoints * POINT_STRIDE)
   let offset = 0
   for (const cloud of perSensor.values()) {

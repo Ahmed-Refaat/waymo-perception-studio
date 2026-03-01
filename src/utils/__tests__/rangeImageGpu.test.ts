@@ -35,33 +35,42 @@ import {
 let gpu: GPU | null = null
 let skipReason = ''
 
-try {
-  // Dynamic import to avoid hard failure if platform binary missing
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const webgpu = require('webgpu')
-  // Register WebGPU globals (GPUBufferUsage, GPUMapMode, etc.) into globalThis
-  // Without this, rangeImageGpu.ts can't reference GPUBufferUsage.STORAGE etc.
-  Object.assign(globalThis, webgpu.globals)
-  // create([]) returns the GPU object directly (NOT { gpu: ... })
-  // See: https://github.com/dawn-gpu/node-webgpu#usage
-  gpu = webgpu.create([]) as GPU
-  if (!gpu || typeof gpu.requestAdapter !== 'function') {
-    skipReason = 'webgpu.create() did not return a valid GPU object'
-    gpu = null
+// Guard: require('webgpu') loads a native Dawn binary that can FATAL-crash
+// the Node process on incompatible versions (e.g. Node v25 + dawn.node).
+// Since the crash bypasses try/catch, we probe in a subprocess first.
+// Skip with SKIP_GPU_TESTS=1 if needed.
+if (process.env.SKIP_GPU_TESTS) {
+  skipReason = 'GPU tests explicitly disabled (SKIP_GPU_TESTS=1)'
+} else {
+  try {
+    // Probe: spawn a subprocess to check if require('webgpu') crashes.
+    // If it does, the subprocess exits non-zero and we skip gracefully.
+    const { execSync } = require('child_process')
+    execSync('node -e "require(\'webgpu\')"', { timeout: 5000, stdio: 'pipe' })
+
+    // Subprocess survived — safe to load in main process
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const webgpu = require('webgpu')
+    Object.assign(globalThis, webgpu.globals)
+    gpu = webgpu.create([]) as GPU
+    if (!gpu || typeof gpu.requestAdapter !== 'function') {
+      skipReason = 'webgpu.create() did not return a valid GPU object'
+      gpu = null
+    }
+  } catch (e) {
+    skipReason = `WebGPU not available: ${(e as Error).message}`
   }
-} catch (e) {
-  skipReason = `WebGPU not available on this platform: ${(e as Error).message}`
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const WAYMO_DATA = resolve(__dirname, '../../../waymo_data')
-const SEGMENT_ID = '10023947602400723454_1120_000_1140_000'
+const FIXTURES = resolve(__dirname, '../../__fixtures__')
+const SEGMENT_ID = 'mock_segment_0000'
 
 function parquetPath(component: string): string {
-  return resolve(WAYMO_DATA, component, `${SEGMENT_ID}.parquet`)
+  return resolve(FIXTURES, SEGMENT_ID, `${component}.parquet`)
 }
 
 const openFds: number[] = []
@@ -147,26 +156,26 @@ const shouldSkip = !!skipReason || !gpu
 
 describe('GPU vs CPU consistency', () => {
   it.skipIf(shouldSkip)('point counts match', async () => {
-    const cpuCloud = convertAllSensors(allRangeImages, calibrations)
+    const cpuResult = convertAllSensors(allRangeImages, calibrations)
     const gpuCloud = await convertAllSensorsGpu(allRangeImages, calibrations, gpu!)
 
     // Point counts should be identical (same filtering logic)
-    expect(gpuCloud.pointCount).toBe(cpuCloud.pointCount)
+    expect(gpuCloud.pointCount).toBe(cpuResult.merged.pointCount)
   })
 
   it.skipIf(shouldSkip)('xyz positions match within float32 epsilon', async () => {
-    const cpuCloud = convertAllSensors(allRangeImages, calibrations)
+    const cpuResult = convertAllSensors(allRangeImages, calibrations)
     const gpuCloud = await convertAllSensorsGpu(allRangeImages, calibrations, gpu!)
 
     // Note: GPU uses atomic counter for stream compaction, so point ORDER
     // may differ from CPU. We compare aggregate statistics:
 
     // 1. Total point count
-    expect(gpuCloud.pointCount).toBe(cpuCloud.pointCount)
+    expect(gpuCloud.pointCount).toBe(cpuResult.merged.pointCount)
 
     // 2. Bounding box should match closely
-    const cpuBounds = computeBounds(cpuCloud.positions, cpuCloud.pointCount)
-    const gpuBounds = computeBounds(gpuCloud.positions, gpuCloud.pointCount)
+    const cpuBounds = computeBounds(cpuResult.merged.positions, cpuResult.merged.pointCount, POINT_STRIDE)
+    const gpuBounds = computeBounds(gpuCloud.positions, gpuCloud.pointCount, 4)
 
     expect(gpuBounds.minX).toBeCloseTo(cpuBounds.minX, 1)
     expect(gpuBounds.maxX).toBeCloseTo(cpuBounds.maxX, 1)
@@ -177,14 +186,14 @@ describe('GPU vs CPU consistency', () => {
   })
 
   it.skipIf(shouldSkip)('intensity values and sum match', async () => {
-    const cpuCloud = convertAllSensors(allRangeImages, calibrations)
+    const cpuResult = convertAllSensors(allRangeImages, calibrations)
     const gpuCloud = await convertAllSensorsGpu(allRangeImages, calibrations, gpu!)
 
-    // Sum all intensity values (index 3 of each [x,y,z,i] quad)
+    // Sum all intensity values (index 3 of each stride)
     let cpuSum = 0
     let gpuSum = 0
-    for (let i = 0; i < cpuCloud.pointCount; i++) {
-      cpuSum += cpuCloud.positions[i * POINT_STRIDE + 3]
+    for (let i = 0; i < cpuResult.merged.pointCount; i++) {
+      cpuSum += cpuResult.merged.positions[i * POINT_STRIDE + 3]
     }
     for (let i = 0; i < gpuCloud.pointCount; i++) {
       gpuSum += gpuCloud.positions[i * 4 + 3]
@@ -199,9 +208,9 @@ describe('GPU vs CPU consistency', () => {
     const cpuT0 = performance.now()
     convertAllSensors(allRangeImages, calibrations)
     const cpuMs = performance.now() - cpuT0
-    const gpuResult = await convertAllSensorsGpu(allRangeImages, calibrations, gpu!)
-    console.log(`\n  CPU: ${cpuMs.toFixed(1)}ms, GPU: ${gpuResult.elapsedMs.toFixed(1)}ms`)
-    console.log(`  Speedup: ${(cpuMs / gpuResult.elapsedMs).toFixed(1)}x`)
+    const gpuResult2 = await convertAllSensorsGpu(allRangeImages, calibrations, gpu!)
+    console.log(`\n  CPU: ${cpuMs.toFixed(1)}ms, GPU: ${gpuResult2.elapsedMs.toFixed(1)}ms`)
+    console.log(`  Speedup: ${(cpuMs / gpuResult2.elapsedMs).toFixed(1)}x`)
   })
 
   if (skipReason) {
@@ -217,15 +226,15 @@ describe('GPU vs CPU consistency', () => {
 // Helper
 // ---------------------------------------------------------------------------
 
-function computeBounds(positions: Float32Array, pointCount: number) {
+function computeBounds(positions: Float32Array, pointCount: number, stride = 4) {
   let minX = Infinity, maxX = -Infinity
   let minY = Infinity, maxY = -Infinity
   let minZ = Infinity, maxZ = -Infinity
 
   for (let i = 0; i < pointCount; i++) {
-    const x = positions[i * 4]
-    const y = positions[i * 4 + 1]
-    const z = positions[i * 4 + 2]
+    const x = positions[i * stride]
+    const y = positions[i * stride + 1]
+    const z = positions[i * stride + 2]
     if (x < minX) minX = x
     if (x > maxX) maxX = x
     if (y < minY) minY = y
