@@ -120,6 +120,42 @@ JS heap delta is similar because the savings are in raster memory (decoded pixel
 
 ---
 
+## Current memory baseline (post OPT-001 + OPT-002)
+
+**Date:** 2026-03-01
+**Segment:** #1 · 1045547 · San Francisco · Day (199 frames, all cached)
+
+| Metric | Pre-optimizations | Post OPT-001 + OPT-002 | Delta |
+|---|---|---|---|
+| `performance.memory.usedJSHeapSize` | 4,140 MB | 4,091 MB | **-49 MB** |
+| Heap snapshot (self-sizes) | 4,140 MB | 4,106 MB | **-34 MB** |
+| Heap node count | 2,049,766 | 1,487,216 | **-562,550 (-27%)** |
+| V8 heap limit | 4,096 MB | 4,096 MB | — |
+| Heap utilization | 101% (over limit) | 99.9% | — |
+
+### Heap breakdown (estimated, 199 frames cached)
+
+| Category | Estimated size | Notes |
+|---|---|---|
+| LiDAR point clouds | ~950 MB | 170K pts × 7 floats × 4B × 199 frames |
+| Camera JPEG ArrayBuffers | ~200 MB | 5 cameras × ~200KB avg × 199 frames |
+| Bounding box rows | ~50 MB | ~30 boxes/frame × metadata × 199 frames |
+| Poses + calibrations | ~10 MB | 4×4 matrices + camera params |
+| Parquet metadata + buffers | ~100 MB | Row group decompression buffers |
+| Three.js scene graph | ~50 MB | Geometries, materials, textures |
+| React fiber tree + Zustand | ~30 MB | Component tree, store subscriptions |
+| Other (V8 overhead, strings) | ~2,700 MB | GC metadata, hidden classes, etc. |
+
+### Next steps for memory reduction
+
+The heap is dominated by the **frame cache holding all 199 frames**. The two optimizations so far addressed leak rate (OPT-001) and raster memory (OPT-002), but the fundamental issue is caching every frame simultaneously. Further reduction requires:
+
+- **LRU frame cache** — keep only N frames around the playhead (e.g., ±30), evict distant frames. Requires re-fetching on seek but drops steady-state memory proportionally.
+- **SharedArrayBuffer for lidar** — share point cloud buffers between workers and main thread without copying. Halves the lidar memory footprint.
+- **Streaming camera JPEGs** — don't cache all 199 frames of camera ArrayBuffers; decode on demand from Parquet row groups with a small LRU.
+
+---
+
 ## Rejected / Deferred
 
 ### computeBoundingSphere optimization
