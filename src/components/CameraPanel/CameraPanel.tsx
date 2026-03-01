@@ -16,6 +16,7 @@ import { useSceneStore } from '../../stores/useSceneStore'
 import { CameraName, BOX_TYPE_COLORS, BoxType, CAMERA_RESOLUTION, HIGHLIGHT_COLOR } from '../../types/waymo'
 import type { ParquetRow } from '../../utils/merge'
 import { colors, fonts, radius, shadows } from '../../theme'
+import BBoxOverlayCanvas from './BBoxOverlayCanvas'
 
 // Camera display order: surround view left-to-right
 const CAMERA_ORDER: { id: number; label: string }[] = [
@@ -41,6 +42,7 @@ export default function CameraPanel() {
   const cameraImages = useSceneStore((s) => s.currentFrame?.cameraImages)
   const cameraBoxes = useSceneStore((s) => s.currentFrame?.cameraBoxes)
   const boxMode = useSceneStore((s) => s.boxMode)
+  const boxRenderer = useSceneStore((s) => s.boxRenderer)
   const activeCam = useSceneStore((s) => s.activeCam)
   const toggleActiveCam = useSceneStore((s) => s.actions.toggleActiveCam)
   const setHoveredCam = useSceneStore((s) => s.actions.setHoveredCam)
@@ -79,6 +81,7 @@ export default function CameraPanel() {
           label={label}
           imageBuffer={cameraImages?.get(id) ?? null}
           boxes={boxesByCamera.get(id) ?? EMPTY_BOXES}
+          boxRenderer={boxRenderer}
           active={activeCam === id}
           onTogglePov={toggleActiveCam}
           onHover={setHoveredCam}
@@ -99,12 +102,13 @@ interface CameraViewProps {
   label: string
   imageBuffer: ArrayBuffer | null
   boxes: ParquetRow[]
+  boxRenderer: 'svg' | 'canvas'
   active: boolean
   onTogglePov: (cameraName: number) => void
   onHover: (cameraName: number | null) => void
 }
 
-function CameraView({ cameraName, label, imageBuffer, boxes, active, onTogglePov, onHover }: CameraViewProps) {
+function CameraView({ cameraName, label, imageBuffer, boxes, boxRenderer, active, onTogglePov, onHover }: CameraViewProps) {
   /** The URL currently displayed (kept until a new image fully loads) */
   const [displayUrl, setDisplayUrl] = useState<string | null>(null)
   /** The newest blob URL being loaded (may not be visible yet) */
@@ -198,7 +202,9 @@ function CameraView({ cameraName, label, imageBuffer, boxes, active, onTogglePov
 
       {/* 2D bounding box overlay */}
       {boxes.length > 0 && (
-        <BBoxOverlay cameraName={cameraName} boxes={boxes} />
+        boxRenderer === 'canvas'
+          ? <BBoxOverlayCanvas cameraName={cameraName} boxes={boxes} />
+          : <BBoxOverlay cameraName={cameraName} boxes={boxes} />
       )}
 
       {/* Label overlay */}

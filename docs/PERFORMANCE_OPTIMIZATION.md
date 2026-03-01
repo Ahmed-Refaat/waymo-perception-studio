@@ -343,6 +343,88 @@ The merge overhead is negligible because the colormap loop (11.3 ms) already ite
 
 ---
 
+## OPT-005: Canvas 2D bounding box overlay
+
+**Date:** 2026-03-01
+**Status:** Implemented
+**Files:** `src/components/CameraPanel/BBoxOverlayCanvas.tsx` (new), `src/stores/useSceneStore.ts`, `src/components/CameraPanel/CameraPanel.tsx`, `src/components/LidarViewer/LidarViewer.tsx`
+
+### Problem
+
+The SVG-based `BBoxOverlay` caused **~350 DOM attribute mutations per frame scrub** across 5 cameras, adding **+43ms processing time** (INP: 89ms vs 56ms boxes-off). React diffs ~131 `<rect>` elements every frame, updating `x`, `y`, `width`, `height`, `stroke`, `strokeWidth` attributes even though the underlying data is a simple redraw.
+
+### Alternatives considered
+
+| Approach | Tradeoff |
+|---|---|
+| **A) Canvas 2D overlay** | Zero DOM mutations — one `clearRect` + loop of `strokeRect` per camera. Imperative draw, no React diffing. |
+| B) React-managed `<canvas>` with virtual DOM | Still has React reconciliation overhead, defeats the purpose. |
+| C) WebGL overlay | Overkill for 2D rectangles. Adds GPU context management complexity. |
+| D) Optimize SVG (key-by-id, memoize harder) | Reduces but doesn't eliminate DOM mutations. Still ~131 rects to diff. |
+
+### Decision
+
+Option A — new `BBoxOverlayCanvas` component with imperative Canvas 2D rendering. The existing SVG `BBoxOverlay` is preserved and selectable via a UI toggle (`boxRenderer: 'svg' | 'canvas'`, default `'canvas'`).
+
+### Implementation details
+
+- **Transform**: `computeTransform()` maps image pixels → display pixels matching SVG `preserveAspectRatio="xMidYMid slice"` behavior.
+- **DPR handling**: Canvas backing store scaled by `devicePixelRatio` for crisp rendering on HiDPI displays.
+- **ResizeObserver**: Recomputes canvas dimensions and redraws on container resize.
+- **Imperative store subscriptions**: `highlightedCameraBoxIds` and `hoveredBoxId` are subscribed via `useSceneStore.subscribe()` with refs — no React re-renders for highlight state changes.
+- **Hit-testing**: `onMouseMove` inverse-transforms mouse coords to image space and loops interactive boxes (pedestrian/cyclist only) to find hits. `hitIdRef` prevents redundant `setHoveredBox` calls.
+
+### Measurements
+
+Methodology: chrome-devtools performance trace with 10 real `keydown` (ArrowRight) scrubs, boxes ON, segment #1 (San Francisco, ~120 boxes/frame across 5 cameras). MutationObserver on `<main>` subtree. Memory via `performance.memory.usedJSHeapSize` + heap snapshot.
+
+**INP (Interaction to Next Paint) — worst keydown across 10 scrubs:**
+
+| Phase | SVG | Canvas | Delta |
+|---|---|---|---|
+| Input delay | 0.2 ms | 1 ms | +0.8 ms |
+| **Processing duration** | **51 ms** | **13 ms** | **-38 ms (-75%)** |
+| Presentation delay | 38 ms | 43 ms | +5 ms |
+| **Total INP** | **89 ms** | **57 ms** | **-32 ms (-36%)** |
+
+The processing duration drop (51→13ms) is the key win — React no longer diffs ~120 `<rect>` elements with 6+ attributes each. The +5ms presentation delay is noise (Canvas 2D draw is <1ms; the variance comes from compositor scheduling).
+
+**DOM mutations per frame scrub:**
+
+| Metric | SVG | Canvas | Delta |
+|---|---|---|---|
+| Total mutations/scrub | 388 | 16 | **-372 (-96%)** |
+| Attribute mutations/scrub | 421 | 11 | **-410 (-97%)** |
+| ChildList mutations/scrub | 1 | 0 | -1 |
+
+The remaining 16 mutations in Canvas mode are from the 3D scene (point cloud buffer updates, slider value, frame counter text) — zero from the 2D box overlay.
+
+**DOM node count (boxes ON):**
+
+| Metric | SVG | Canvas | Delta |
+|---|---|---|---|
+| Total DOM nodes | 377 | 136 | **-241 (-64%)** |
+| SVG rect elements | 123 | 0 | -123 |
+| SVG elements (all) | 251 | 0 | -251 |
+
+**Frame timing (rAF-to-rAF, 10 scrubs):**
+
+| Metric | SVG | Canvas | Delta |
+|---|---|---|---|
+| p50 | 81.4 ms | 74.2 ms | **-7.2 ms (-9%)** |
+| p90 | 88.4 ms | 79.6 ms | **-8.8 ms (-10%)** |
+| Average | 62.3 ms | 58.3 ms | **-4.0 ms (-6%)** |
+
+**Memory (JS heap):**
+
+| Metric | SVG | Canvas | Delta |
+|---|---|---|---|
+| usedJSHeapSize | 3,330 MB | 3,337 MB | ~0 (noise) |
+
+No heap impact — expected, since the optimization targets DOM mutation throughput, not memory allocation. The ~120 SVG rect DOM nodes are negligible vs the 3.3 GB frame cache.
+
+---
+
 ## Rejected / Deferred
 
 ### computeBoundingSphere optimization
