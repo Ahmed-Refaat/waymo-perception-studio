@@ -80,15 +80,6 @@ function colormapColor(stops: [number, number, number][], t: number): [number, n
   ]
 }
 
-// Sensor color map for per-sensor coloring mode (cool-tone Waymo palette)
-const SENSOR_COLORS: Record<number, [number, number, number]> = {
-  1: [0.0, 0.91, 0.62],  // TOP — teal (#00E89D)
-  2: [0.0, 0.79, 0.86],  // FRONT — cyan (#00C9DB)
-  3: [0.30, 0.66, 1.0],  // SIDE_LEFT — sky blue (#4DA8FF)
-  4: [0.48, 0.44, 1.0],  // SIDE_RIGHT — indigo (#7B6FFF)
-  5: [0.71, 0.56, 1.0],  // REAR — lavender (#B490FF)
-}
-
 // ---------------------------------------------------------------------------
 // Attribute extraction helpers
 // ---------------------------------------------------------------------------
@@ -118,7 +109,6 @@ const MAX_POINTS = 200_000
 
 export default function PointCloud() {
   const currentFrame = useSceneStore((s) => s.currentFrame)
-  const currentFrameIndex = useSceneStore((s) => s.currentFrameIndex)
   const visibleSensors = useSceneStore((s) => s.visibleSensors)
   const pointOpacity = useSceneStore((s) => s.pointOpacity)
   const colormapMode = useSceneStore((s) => s.colormapMode)
@@ -193,8 +183,8 @@ export default function PointCloud() {
   return (
     <points frustumCulled={false}>
       <bufferGeometry ref={geometryRef}>
-        <bufferAttribute attach="attributes-position" {...posAttr} />
-        <bufferAttribute attach="attributes-color" {...colorAttr} />
+        <primitive object={posAttr} attach="attributes-position" />
+        <primitive object={colorAttr} attach="attributes-color" />
       </bufferGeometry>
       <pointsMaterial
         size={0.08}

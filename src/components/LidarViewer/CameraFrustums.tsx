@@ -63,9 +63,7 @@ function CameraFrustum({
         <bufferGeometry>
           <bufferAttribute
             attach="attributes-position"
-            array={basePositions}
-            count={basePositions.length / 3}
-            itemSize={3}
+            args={[basePositions, 3]}
           />
         </bufferGeometry>
         <lineBasicMaterial color={lineColor} transparent opacity={lineOpacity} />
@@ -76,9 +74,7 @@ function CameraFrustum({
         <bufferGeometry>
           <bufferAttribute
             attach="attributes-position"
-            array={edgePositions}
-            count={edgePositions.length / 3}
-            itemSize={3}
+            args={[edgePositions, 3]}
           />
         </bufferGeometry>
         <lineBasicMaterial color={lineColor} />

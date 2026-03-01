@@ -470,9 +470,9 @@ export const useSceneStore = create<SceneState>((set, get) => ({
           const lidarPf = internal.parquetFiles.get('lidar')
           if (lidarPf) {
             firstFramePromises.push(
-              buildHeavyFileFrameIndex(lidarPf).then((idx) => {
+              buildHeavyFileFrameIndex(lidarPf).then(async (idx) => {
                 internal.lidarFrameIndex = idx
-                return loadFrameMainThread(0, set, get)
+                await loadFrameMainThread(0, set, get)
               })
             )
           }
@@ -761,29 +761,6 @@ export const useSceneStore = create<SceneState>((set, get) => ({
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Find which row group index contains a given frame.
- * Uses the lidar parquet file's row group boundaries + frame index mapping.
- */
-function findRowGroupForFrame(frameIndex: number): number {
-  const lidarPf = internal.parquetFiles.get('lidar')
-  if (!lidarPf) return -1
-
-  const timestamp = internal.timestamps[frameIndex]
-  if (timestamp === undefined) return -1
-
-  // Each lidar row group has a rowStart..rowEnd range.
-  // We need to find which RG contains rows for this timestamp.
-  // Since frames are time-sorted and row groups are sequential,
-  // we can estimate: frameIndex / framesPerRG ≈ rowGroupIndex.
-  // But for safety, use the frame index's row mapping.
-  const totalFrames = internal.timestamps.length
-  const numRGs = lidarPf.rowGroups.length
-  const framesPerRG = Math.ceil(totalFrames / numRGs)
-  const estimated = Math.min(Math.floor(frameIndex / framesPerRG), numRGs - 1)
-  return estimated
-}
-
 const LIDAR_COLUMNS = [
   'key.frame_timestamp_micros',
   'key.laser_name',
@@ -1043,7 +1020,7 @@ async function loadStartupData(set: (partial: Partial<SceneState>) => void, get:
 async function initDataWorker(
   sources: Map<string, File | string>,
   get: () => SceneState,
-  set: (partial: Partial<SceneState>) => void,
+  _set: (partial: Partial<SceneState>) => void,
 ) {
   const lidarSource = sources.get('lidar')
   if (!lidarSource) return

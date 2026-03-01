@@ -231,7 +231,7 @@ export default function LidarViewer() {
           up: [0, 0, 1],
         }}
         gl={{ antialias: false }}
-        raycaster={{ params: { Line: { threshold: 0.15 } } }}
+        raycaster={{ params: { Line: { threshold: 0.15 } } as never }}
         style={{ width: '100%', height: '100%' }}
         onCreated={({ gl }) => {
           gl.setClearColor(colors.bgDeep)

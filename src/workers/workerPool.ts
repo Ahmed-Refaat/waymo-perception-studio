@@ -57,7 +57,11 @@ export class WorkerPool {
     reject: (err: Error) => void
   }> = []
 
-  constructor(public readonly concurrency: number) {}
+  readonly concurrency: number
+
+  constructor(concurrency: number) {
+    this.concurrency = concurrency
+  }
 
   /**
    * Initialize all workers. Each opens the Parquet file independently.

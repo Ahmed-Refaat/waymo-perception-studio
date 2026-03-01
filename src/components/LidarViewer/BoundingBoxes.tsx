@@ -254,8 +254,8 @@ function TrajectoryTrail({ objectId, type, currentFrame, trailLength, worldMode 
   if (!geometry) return null
 
   return (
+    // @ts-expect-error — R3F maps <line> to THREE.Line, not SVG <line>
     <line geometry={geometry}>
-      {/* @ts-expect-error — R3F line material child */}
       <lineBasicMaterial color={color} transparent opacity={0.6} />
     </line>
   )
