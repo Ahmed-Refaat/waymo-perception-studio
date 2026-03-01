@@ -64,7 +64,7 @@ Measured during the same profiling session, confirming no frame budget regressio
 ## OPT-002: Camera thumbnail bitmap resize
 
 **Date:** 2026-03-01
-**Status:** Implemented
+**Status:** REVERTED
 **Files:** `src/components/CameraPanel/CameraPanel.tsx`
 
 ### Problem
@@ -88,15 +88,9 @@ This raster memory lives outside the V8 JS heap (in GPU/compositor process memor
 | C) Server-side thumbnails | Requires a server. Breaks zero-install browser-only constraint. |
 | D) CSS `image-rendering` / `content-visibility` | Browser still decodes full resolution; CSS only affects display. No memory savings. |
 
-### Decision
+### Decision (initially Option A, then reverted)
 
-Option A — replaced the entire `Blob` → `URL.createObjectURL` → `new Image()` → `<img>` pipeline with:
-1. `createImageBitmap(blob, { resizeHeight: 160, resizeQuality: 'low' })` — decodes JPEG directly to thumbnail size
-2. Draw to a `<canvas>` element via `ctx.drawImage(bmp, 0, 0)`
-3. `bmp.close()` on the previous bitmap when a new frame arrives, and on unmount
-4. Sequence counter (`seqRef`) to discard stale decodes during fast scrubbing
-
-Original JPEG `ArrayBuffer` is kept intact in the cache (for potential future full-res POV use).
+Implemented Option A — replaced `Blob` → `URL.createObjectURL` → `new Image()` → `<img>` with `createImageBitmap(blob, { resizeHeight: 160 })` → `<canvas>` draw.
 
 ### Measurements
 
@@ -107,16 +101,25 @@ Original JPEG `ArrayBuffer` is kept intact in the cache (for potential future fu
 | Decoded bitmap size | 41.1 MB | 884 KB | **-97.8%** |
 | Pixel count | 12.5M px | 0.26M px | **-97.9%** |
 
-**JS heap delta (50 frame scrubs, heap snapshots):**
+**JS heap (full segment loaded, 199 frames):**
 
-| Metric | Before fix | After fix |
-|---|---|---|
-| Object delta | +68,743 | +66,273 |
-| Size delta | +3.8 MB | +3.7 MB |
+| Metric | Before fix | After fix | Delta |
+|---|---|---|---|
+| Heap snapshot (self-sizes) | 4,140 MB | 4,106 MB | **-34 MB** |
 
-JS heap delta is similar because the savings are in raster memory (decoded pixel backing stores), not V8 heap objects. The Blob and ImageBitmap JS wrapper objects are similar in size.
+The 97.8% raster reduction sounds impressive, but only translated to a **34 MB** JS heap reduction (0.8%) because the heap is dominated by cached frame data (~950 MB LiDAR + ~200 MB camera JPEG ArrayBuffers), not decoded bitmaps.
 
-**Visual quality:** Confirmed via screenshot — thumbnail cards render correctly with `objectFit: 'cover'`, 2D bounding box SVG overlays remain functional.
+### Why reverted
+
+1. **Insufficient ROI** — 34 MB reduction against a 4.1 GB heap (0.8%). The optimization targeted the wrong memory layer: raster/GPU bitmap memory instead of the V8 heap where the actual pressure is.
+
+2. **Image quality degradation** — `resizeHeight: 160` with `resizeQuality: 'low'` introduced visible aliasing on thin lines (signs, poles, lane markings) compared to the browser's native `<img>` + `objectFit: 'cover'` downscaling which uses higher-quality filtering.
+
+3. **Scrubbing lag** — `createImageBitmap` is async (returns a Promise). During fast scrubbing, the decode-to-canvas path added perceptible latency compared to the synchronous `<img>.src = blobURL` swap with browser-managed decode scheduling.
+
+### Lesson learned
+
+Measure where the bytes actually live before optimizing. The heap snapshot showed 4.1 GB in V8, dominated by cached `ArrayBuffer`s (lidar + camera). Decoded bitmap memory lives in the GPU/compositor process — reducing it doesn't help V8 heap pressure. The right fix is an **LRU frame cache** to bound the number of cached frames, not thumbnail resizing.
 
 ---
 
